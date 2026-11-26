@@ -15,6 +15,7 @@ from .catalog_widgets import button, local_time
 from .scanner import snapshot_file
 from .search_ui import SearchTab
 from .snapshots_ui import SnapshotsTab
+from .stats_ui import StatsTab
 
 
 STATES = {"never":"尚未索引", "running":"正在索引", "complete":"完整索引", "partial":"部分覆盖",
@@ -73,8 +74,15 @@ class CatalogPage(QFrame):
         self.snaps = SnapshotsTab(self,self.db_path)
         self.tabs.addTab(self.search,"检索与标注")
         self.tabs.addTab(self.snaps,"快照比对")
+        self.stats = StatsTab(self,self.db_path)
+        self.tabs.addTab(self.stats,"空间统计")
+        self.tabs.currentChanged.connect(self.tab_changed)
         layout.addWidget(self.tabs,1)
         self.reload()
+
+    def tab_changed(self,index):
+        if self.tabs.widget(index) is self.stats and self.stats.dirty:
+            self.stats.compute()
 
     def message(self,text):
         self.window._note(text)
@@ -110,6 +118,7 @@ class CatalogPage(QFrame):
         self.root_id = self.selector.currentData()
         self.update_root_status(self.roots)
         self.snaps.reload(self.root_id)
+        self.stats.reset()
         self.search.criteria_changed()
 
     def update_root_status(self,roots):

@@ -128,6 +128,9 @@ class SearchTab(QWidget):
         self.back = button("返回检索","returnSearch",self.criteria_changed)
         self.back.hide()
         controls.addWidget(self.back)
+        self.clear_group = button("清除分组","clearArchiveGroup",self.release_group)
+        self.clear_group.hide()
+        controls.addWidget(self.clear_group)
         self.tag_button = button("给选中项加标签…","addArchiveTags",self.add_tags)
         controls.addWidget(self.tag_button)
         layout.addLayout(controls)
@@ -214,7 +217,8 @@ class SearchTab(QWidget):
     def filters_dialog(self):
         dialog = SearchFilters(self,self.conditions)
         if dialog.exec()==QDialog.DialogCode.Accepted:
-            self.conditions = dialog.values
+            group = {k:v for k,v in self.conditions.items() if k in ("ext_exact","directory_bucket")}
+            self.conditions = {**group,**dialog.values}
             self.criteria_changed()
 
     def save_search(self):
@@ -231,7 +235,15 @@ class SearchTab(QWidget):
         name = self.saved.itemData(index)
         if name is None:
             return
-        filters = dict(self.saved_data[name])
+        self.use_filters(self.saved_data[name])
+
+    def release_group(self):
+        self.conditions.pop("ext_exact",None)
+        self.conditions.pop("directory_bucket",None)
+        self.criteria_changed()
+
+    def use_filters(self,values):
+        filters = dict(values)
         self.page.select_root(filters.pop("root_id",None))
         self.keyword.setText(filters.pop("text",""))
         self.conditions = filters
@@ -247,6 +259,7 @@ class SearchTab(QWidget):
         self.generation += 1
         self.timer.start(delay)
         self.filter_button.setText(f"筛选 ({len(self.conditions)})…" if self.conditions else "筛选…")
+        self.clear_group.setVisible("ext_exact" in self.conditions or "directory_bucket" in self.conditions)
 
     def _launch(self):
         if self.closing or self.job:
@@ -303,6 +316,11 @@ class SearchTab(QWidget):
         title = f"找到 {total:,} 条记录" if total else "无匹配记录"
         if not roots:
             title = "尚无档案库。请先添加文件夹并刷新索引。"
+        if "ext_exact" in self.conditions:
+            suffix.insert(0,self.conditions["ext_exact"] or "无扩展名")
+        if "directory_bucket" in self.conditions:
+            bucket = self.conditions["directory_bucket"]
+            suffix.insert(0,f"第 {bucket['depth']} 层 · {bucket['path'] or '根目录文件'}")
         self.summary.setText("　·　".join([title,*suffix]))
         if data["rows"]:
             index = next((i for i,r in enumerate(data["rows"]) if r["id"]==self.preserve_entry),0)
