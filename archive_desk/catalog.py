@@ -19,6 +19,8 @@ _lock = Lock()
 
 
 def ensure_catalog_schema(db):
+    had_complete_baselines = db.execute("""SELECT 1 FROM sqlite_master WHERE type='table'
+                                AND name='catalog_complete_baselines'""").fetchone() is not None
     for sql in (
         """CREATE TABLE IF NOT EXISTS catalog_roots(
             id INTEGER PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL, dev TEXT NOT NULL,
@@ -39,8 +41,31 @@ def ensure_catalog_schema(db):
         """CREATE TABLE IF NOT EXISTS catalog_issues(
             root_id INTEGER NOT NULL REFERENCES catalog_roots(id),relpath TEXT NOT NULL,
             reason TEXT NOT NULL,PRIMARY KEY(root_id,relpath))""",
+        """CREATE TABLE IF NOT EXISTS catalog_complete_baselines(
+            root_id INTEGER PRIMARY KEY REFERENCES catalog_roots(id) ON DELETE CASCADE,
+            indexed_at TEXT NOT NULL,generation INTEGER NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS catalog_complete_files(
+            root_id INTEGER NOT NULL REFERENCES catalog_complete_baselines(root_id) ON DELETE CASCADE,
+            relpath TEXT NOT NULL,name TEXT NOT NULL,ext TEXT NOT NULL,size INTEGER NOT NULL,
+            mtime_ns INTEGER NOT NULL,dev TEXT NOT NULL,ino TEXT NOT NULL,change_ns TEXT,usn INTEGER,
+            digest TEXT,PRIMARY KEY(root_id,relpath)) WITHOUT ROWID""",
     ):
         db.execute(sql)
+    if not had_complete_baselines:
+        # Before this table existed, transfers could update live rows without
+        # changing indexed_at or generation. The additional revision bump is
+        # the durable distinction. Ambiguous old libraries need a fresh full scan.
+        db.execute("""INSERT INTO catalog_complete_baselines(root_id,indexed_at,generation)
+            SELECT id,indexed_at,generation FROM catalog_roots r
+            WHERE published_state='complete' AND generation>0 AND revision=generation
+            AND indexed_at=last_complete_at
+            AND NOT EXISTS(SELECT 1 FROM catalog_issues i WHERE i.root_id=r.id)
+            AND NOT EXISTS(SELECT 1 FROM catalog_files f WHERE f.root_id=r.id AND f.active=1
+                           AND f.stale=1)""")
+        db.execute(f"""INSERT INTO catalog_complete_files(root_id,{_columns})
+            SELECT f.root_id,{','.join('f.'+col for col in _columns.split(','))}
+            FROM catalog_files f JOIN catalog_complete_baselines b ON b.root_id=f.root_id
+            WHERE f.active=1""")
     from .catalog_search import ensure_search_schema
     ensure_search_schema(db)
 
@@ -125,17 +150,22 @@ class Catalog:
                                   (name, str(path), dev, ino)).lastrowid
 
     def _root(self, db, root_id):
-        row = db.execute("SELECT * FROM catalog_roots WHERE id=?", (root_id,)).fetchone()
+        row = db.execute("""SELECT r.*,b.indexed_at AS baseline_indexed_at,
+                b.generation AS baseline_generation FROM catalog_roots r
+                LEFT JOIN catalog_complete_baselines b ON b.root_id=r.id WHERE r.id=?""",
+                         (root_id,)).fetchone()
         if row is None:
             raise ValueError("指定的库不存在")
         return dict(row)
 
     def roots(self):
         with database_connection(self.path) as db:
-            rows = [dict(r) for r in db.execute("""SELECT r.*,
+            rows = [dict(r) for r in db.execute("""SELECT r.*,b.indexed_at AS baseline_indexed_at,
+                      b.generation AS baseline_generation,
                       (SELECT COUNT(*) FROM catalog_files f WHERE f.root_id=r.id AND f.active=1) AS file_count,
                       (SELECT COUNT(*) FROM catalog_issues i WHERE i.root_id=r.id) AS issue_count
-                      FROM catalog_roots r ORDER BY r.id""")]
+                      FROM catalog_roots r LEFT JOIN catalog_complete_baselines b
+                      ON b.root_id=r.id ORDER BY r.id""")]
         with _lock:
             for row in rows:
                 if (self.path, row["id"]) in _active:
@@ -341,6 +371,8 @@ class Catalog:
                            ((root_id, p, why) for p, why in blind.items()))
             state = "partial" if blind else "complete"
             now = datetime.now().astimezone().isoformat(timespec="microseconds")
+            if not blind:
+                self._save_complete(db, root_id, now, root["generation"] + 1)
             db.execute("""UPDATE catalog_roots SET online=1,problem='',indexed_at=?,scan_state=?,
                   published_state=?,last_complete_at=COALESCE(?,last_complete_at),
                   generation=generation+1,revision=revision+1 WHERE id=?""",
@@ -352,3 +384,21 @@ class Catalog:
             raise
         finally:
             db.set_progress_handler(None, 0)
+
+    @staticmethod
+    def _save_complete(db, root_id, now, generation):
+        # The manifest has its own keys and values. Later V2 transfers may
+        # relocate or retire live entry IDs; neither change alters this scan.
+        db.execute("""INSERT INTO catalog_complete_baselines VALUES(?,?,?)
+            ON CONFLICT(root_id) DO UPDATE SET indexed_at=excluded.indexed_at,
+            generation=excluded.generation""", (root_id,now,generation))
+        db.execute("""DELETE FROM catalog_complete_files AS b WHERE b.root_id=?
+            AND NOT EXISTS(SELECT 1 FROM observed o WHERE o.relpath=b.relpath)""", (root_id,))
+        fields = _columns.split(",")[1:]
+        lhs = ",".join(fields)
+        rhs = ",".join("excluded."+f for f in fields)
+        previous = ",".join("catalog_complete_files."+f for f in fields)
+        db.execute(f"""INSERT INTO catalog_complete_files(root_id,{_columns})
+            SELECT ?,{_columns} FROM observed WHERE 1
+            ON CONFLICT(root_id,relpath) DO UPDATE SET ({lhs})=({rhs})
+            WHERE ({previous}) IS NOT ({rhs})""", (root_id,))
