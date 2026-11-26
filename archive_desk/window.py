@@ -668,7 +668,10 @@ class MainWindow(QMainWindow):
             invalidator()
         self._sync_controls()
         self._note()
-        stopped = (cancelled and not self.finish_on_cancel) or isinstance(job.error, ScanCancelled)
+        # Catalog transactions signal cancellation by raising ScanCancelled.
+        # A late click after a successful commit must still show that result.
+        stopped = isinstance(job.error, ScanCancelled) or (
+            cancelled and interrupted is None and not self.finish_on_cancel)
         if interrupted is not None and (stopped or job.error):
             interrupted(stopped, job.error)
         elif stopped:

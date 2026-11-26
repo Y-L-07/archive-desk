@@ -175,6 +175,17 @@ def exercise(work):
         assert "已取消" in tab.status.text() and "已取消" in window.notice.text()
         print("手动取消后台索引后，上次发布的条目数保持一致。",flush=True)
 
+        refresh = tab.registry.refresh
+        def cancel_after_commit(*args, **kwargs):
+            result = refresh(*args, **kwargs)
+            kwargs["cancel"].set()
+            return result
+        with patch.object(tab.registry, "refresh", cancel_after_commit):
+            click(window,"refreshArchive")
+            settled()
+        assert tab.registry.roots()[0]["file_count"] == cached_total + 400
+        assert "索引刷新完成" in window.notice.text()
+
         import tempfile
         with patch.object(tempfile,"tempdir",str(work)):
             click(window,"archiveDemo")
