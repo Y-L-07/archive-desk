@@ -124,6 +124,19 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaises(ScanCancelled):
             self.store.compare(old, other, cancel=stop)
 
+    def test_historical_complete_timestamp_alone_does_not_create_a_baseline_option(self):
+        self.publish([("末次可见.txt", "cached", 1, True, True)], issues=["."])
+        with database_connection(self.db) as db:
+            db.execute("UPDATE catalog_roots SET last_complete_at='2024-01-01T00:00:00' WHERE id=1")
+        current, = self.store.sources(1)
+        self.assertEqual((current["source"], current["scan_state"]), ("current", "partial"))
+        with self.assertRaises(ValueError):
+            self.store.create(1, "虚假的完整快照", source="last_complete")
+        self.publish([], issues=["."])
+        with self.assertRaises(ValueError):
+            self.store.create(1, "已变化的旧选择", expected=current)
+        self.assertEqual(self.store.list_snapshots(1), [])
+
     def test_cancel_after_manifest_insert_rolls_back_all_rows(self):
         self.publish([("样例.txt", "hello", 1, True, False)])
         # Interrupt on the final cancellation check, after all INSERTs, before
@@ -164,6 +177,23 @@ class CatalogDemoTests(unittest.TestCase):
             results = store.compare(data["old_id"], data["new_id"])
             self.assertEqual(Counter(r["status"] for r in results),
                              {"added": 1, "missing": 1, "changed": 1, "moved": 1, "uncertain": 3})
+            opts = {row["source"]: row for row in store.sources(data["root_id"])}
+            for source, expected_id, coverage in (("current", data["new_id"], "partial"),
+                                                  ("last_complete", data["old_id"], "complete")):
+                self.assertEqual(opts[source]["scan_state"], coverage)
+                copied = store.create(data["root_id"], "再保存 " + source, source=source, expected=opts[source])
+                records = {r["id"]: r for r in store.list_snapshots(data["root_id"])}
+                self.assertEqual(records[copied]["source"], source)
+                for field in ("indexed_at", "scan_state", "generation", "file_count", "issue_count"):
+                    self.assertEqual(records[copied][field], records[expected_id][field])
+                with database_connection(db) as conn:
+                    def manifest(sid):
+                        return [tuple(r) for r in conn.execute(
+                            """SELECT relpath,size,mtime_ns,digest,stale FROM catalog_snapshot_files
+                               WHERE snapshot_id=? ORDER BY relpath""", (sid,))]
+                    self.assertEqual(manifest(copied), manifest(expected_id))
+                self.assertEqual(store.issues(copied), store.issues(expected_id))
+            self.assertEqual(store.compare(data["old_id"], data["new_id"]), results)
             offline = store.compare(data["offline_old_id"], data["offline_new_id"])
             self.assertEqual([r["status"] for r in offline], ["uncertain"])
             self.assertGreaterEqual(len(messages), 4)

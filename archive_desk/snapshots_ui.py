@@ -39,8 +39,15 @@ class SnapshotsTab(QWidget):
         self.compare_button = button("比较快照","compareSnapshots",self.compare)
         self.create_button = button("新建快照…","createSnapshot",self.create)
         controls.addWidget(self.compare_button)
-        controls.addWidget(self.create_button)
         layout.addLayout(controls)
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("新快照来源"))
+        self.source = QComboBox()
+        self.source.setObjectName("snapshotSource")
+        self.source.setPlaceholderText("尚无已发布清单")
+        source_row.addWidget(self.source,1)
+        source_row.addWidget(self.create_button)
+        layout.addLayout(source_row)
         self.coverage = QLabel()
         self.coverage.setObjectName("muted")
         self.coverage.setWordWrap(True)
@@ -71,6 +78,19 @@ class SnapshotsTab(QWidget):
         previous_old = self.old.currentData() if preferred_old is None else preferred_old
         previous_new = self.new.currentData() if preferred_new is None else preferred_new
         rows = sorted(self.store.list_snapshots(root_id),key=lambda r:r["id"]) if root_id is not None else []
+        selected_source = self.source.currentData()
+        self.source.clear()
+        choices = self.store.sources(root_id) if root_id is not None else []
+        has_baseline = any(r["source"] == "last_complete" for r in choices)
+        for record in choices:
+            scope = "完整覆盖" if record["scan_state"] == "complete" else "部分覆盖（含盲区）"
+            origin = "末次完整扫描原始清单" if record["source"] == "last_complete" else "当前已发布索引"
+            text = f"{origin} · {scope} · 第 {record['generation']} 轮 · {local_time(record['indexed_at'])}"
+            if not has_baseline and record["scan_state"] == "partial":
+                text += " · 暂无完整扫描清单"
+            self.source.addItem(text,record["source"])
+            self.source.setItemData(self.source.count()-1,record,Qt.ItemDataRole.UserRole+1)
+        self.source.setCurrentIndex(max(0,self.source.findData(selected_source)) if choices else -1)
         for combo, preferred, default in ((self.old,previous_old,max(0,len(rows)-2)),
                                            (self.new,previous_new,len(rows)-1)):
             combo.blockSignals(True)
@@ -82,12 +102,13 @@ class SnapshotsTab(QWidget):
                 combo.setItemData(combo.count()-1,f"{local_time(record['indexed_at'])}（{coverage}）",
                                   Qt.ItemDataRole.UserRole+1)
                 combo.setItemData(combo.count()-1,
-                    f"{coverage}\n索引于 {record['indexed_at']}\n快照创建于 {record['created_at']}\n"
+                    f"{'末次完整扫描原始清单' if record['source']=='last_complete' else '当前已发布索引'} · {coverage}\n"
+                    f"索引于 {record['indexed_at']}\n快照创建于 {record['created_at']}\n"
                     f"扫描提示 {record['issue_count']} 条",Qt.ItemDataRole.ToolTipRole)
             idx = combo.findData(preferred)
             combo.setCurrentIndex(idx if idx>=0 else default)
             combo.blockSignals(False)
-        self.create_button.setEnabled(root_id is not None)
+        self.create_button.setEnabled(bool(choices))
         self.invalidate()
 
     def invalidate(self):
@@ -112,10 +133,14 @@ class SnapshotsTab(QWidget):
 
     def create(self):
         root_id = self.root_id
-        name,ok = QInputDialog.getText(self,"新建命名快照","快照名称")
+        source = self.source.currentData()
+        expected = self.source.currentData(Qt.ItemDataRole.UserRole+1)
+        if source is None:
+            return
+        name,ok = QInputDialog.getText(self,"新建命名快照",f"{self.source.currentText()}\n快照名称")
         if ok and name.strip():
             self.page.task("正在保存索引快照…",
-                lambda cancel:self.store.create(root_id,name.strip(),cancel=cancel),
+                lambda cancel:self.store.create(root_id,name.strip(),cancel=cancel,source=source,expected=expected),
                 lambda sid:self.reload(root_id,preferred_new=sid))
 
     def compare(self):

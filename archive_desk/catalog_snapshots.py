@@ -38,6 +38,7 @@ class SnapshotStore:
                     id INTEGER PRIMARY KEY, root_id INTEGER NOT NULL,
                     name TEXT NOT NULL COLLATE NOCASE, created_at TEXT NOT NULL,
                     indexed_at TEXT NOT NULL, generation INTEGER NOT NULL, scan_state TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'current',
                     file_count INTEGER NOT NULL DEFAULT 0, issue_count INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(root_id,name), FOREIGN KEY(root_id) REFERENCES catalog_roots(id) ON DELETE CASCADE
                 );
@@ -53,8 +54,35 @@ class SnapshotStore:
                 );
                 CREATE INDEX IF NOT EXISTS catalog_snap_issue ON catalog_snapshot_issues(snapshot_id);
             """)
+            db.execute("BEGIN IMMEDIATE")
+            if "source" not in {r["name"] for r in db.execute("PRAGMA table_info(catalog_snapshots)")}:
+                db.execute("ALTER TABLE catalog_snapshots ADD COLUMN source TEXT NOT NULL DEFAULT 'current'")
 
-    def create(self, root_id, name, cancel=None):
+    def sources(self, root_id):
+        with database_connection(self.path) as db:
+            db.execute("BEGIN")
+            return self._sources(db, root_id)
+
+    @staticmethod
+    def _sources(db, root_id):
+        root = db.execute("SELECT * FROM catalog_roots WHERE id=?", (root_id,)).fetchone()
+        if root is None:
+            raise ValueError("资料库不存在")
+        choices = []
+        if root["indexed_at"] and root["published_state"] in ("complete", "partial"):
+            choices.append(dict(source="current", indexed_at=root["indexed_at"],
+                                generation=root["generation"], revision=root["revision"],
+                                scan_state=root["published_state"]))
+        # Older databases can carry a timestamp without the corresponding
+        # manifest. Only an actual retained header proves a baseline exists.
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_complete_baselines'").fetchone():
+            baseline = db.execute("SELECT * FROM catalog_complete_baselines WHERE root_id=?", (root_id,)).fetchone()
+            if baseline:
+                choices.append(dict(source="last_complete", indexed_at=baseline["indexed_at"],
+                                    generation=baseline["generation"], scan_state="complete", revision=None))
+        return choices
+
+    def create(self, root_id, name, cancel=None, *, source="current", expected=None):
         name = name.strip() if isinstance(name, str) else ""
         if not name or len(name) > 100 or not name.isprintable():
             raise ValueError("快照名称须为 1 至 100 个可显示字符")
@@ -62,24 +90,31 @@ class SnapshotStore:
             # Refresh publishes one generation atomically. Take its header, live
             # rows, retained blind-region rows, and issue records in one transaction.
             db.execute("BEGIN IMMEDIATE")
-            root = db.execute("SELECT * FROM catalog_roots WHERE id=?", (root_id,)).fetchone()
-            if root is None:
-                raise ValueError("资料库不存在")
-            if not root["indexed_at"] or root["published_state"] not in ("complete", "partial"):
-                raise ValueError("请先完成一次资料库扫描，再创建快照")
+            choices = self._sources(db, root_id)
+            header = next((r for r in choices if r["source"] == source), None)
+            if header is None:
+                raise ValueError("所选快照来源尚无可用清单，请先完成相应扫描")
+            if expected is not None and header != expected:
+                raise ValueError("所选清单在确认期间发生变化，请刷新后重新选择")
             if db.execute("SELECT 1 FROM catalog_snapshots WHERE root_id=? AND name=?",
                           (root_id, name)).fetchone():
                 raise ValueError("该资料库已存在同名快照")
             created = datetime.now().astimezone().isoformat(timespec="seconds")
             snapshot = db.execute("""INSERT INTO catalog_snapshots
-                (root_id,name,created_at,indexed_at,generation,scan_state) VALUES(?,?,?,?,?,?)""",
-                (root_id, name, created, root["indexed_at"], root["generation"],
-                 root["published_state"])).lastrowid
-            files = db.execute("""INSERT INTO catalog_snapshot_files
-                SELECT ?,relpath,size,mtime_ns,digest,stale FROM catalog_files
-                WHERE root_id=? AND active=1""", (snapshot, root_id)).rowcount
-            issues = db.execute("""INSERT INTO catalog_snapshot_issues(snapshot_id,relpath,reason)
-                SELECT ?,relpath,reason FROM catalog_issues WHERE root_id=?""", (snapshot, root_id)).rowcount
+                (root_id,name,created_at,indexed_at,generation,scan_state,source) VALUES(?,?,?,?,?,?,?)""",
+                (root_id, name, created, header["indexed_at"], header["generation"],
+                 header["scan_state"], source)).lastrowid
+            if source == "last_complete":
+                files = db.execute("""INSERT INTO catalog_snapshot_files
+                    SELECT ?,relpath,size,mtime_ns,digest,0 FROM catalog_complete_files
+                    WHERE root_id=?""", (snapshot, root_id)).rowcount
+                issues = 0
+            else:
+                files = db.execute("""INSERT INTO catalog_snapshot_files
+                    SELECT ?,relpath,size,mtime_ns,digest,stale FROM catalog_files
+                    WHERE root_id=? AND active=1""", (snapshot, root_id)).rowcount
+                issues = db.execute("""INSERT INTO catalog_snapshot_issues(snapshot_id,relpath,reason)
+                    SELECT ?,relpath,reason FROM catalog_issues WHERE root_id=?""", (snapshot, root_id)).rowcount
             db.execute("UPDATE catalog_snapshots SET file_count=?,issue_count=? WHERE id=?",
                        (files, issues, snapshot))
             return snapshot

@@ -198,6 +198,26 @@ def exercise(work):
         assert {r["status"] for r in snaps.model.records}=={
             "added","missing","changed","moved","uncertain"}
         print("真实演示入口生成两个独立资料库及两轮快照，包含离线库和五类差异。",flush=True)
+        original_rows = snaps.store.list_snapshots(tab.root_id)
+        comparison = list(snaps.model.records)
+        saved = {}
+        for source, wanted_scope in (("last_complete", "完整覆盖"), ("current", "部分覆盖")):
+            index = snaps.source.findData(source)
+            assert index >= 0
+            snaps.source.setCurrentIndex(index)
+            shown = snaps.source.currentText()
+            assert wanted_scope in shown and "第 " in shown
+            snap("从所选清单创建-" + source)
+            record = snaps.store.list_snapshots(tab.root_id)[0]
+            assert record["source"] == source and record["id"] == snaps.new.currentData()
+            saved[source] = record["id"]
+        snaps.old.setCurrentIndex(snaps.old.findData(saved["last_complete"]))
+        snaps.new.setCurrentIndex(snaps.new.findData(saved["current"]))
+        click(window, "compareSnapshots")
+        settled()
+        assert snaps.model.records == comparison
+        assert snaps.store.list_snapshots(tab.root_id)[2:] == original_rows
+        print("部分覆盖后在窗口分别保存上一完整清单和当前带盲区清单，扫描依据及差异可核对，原快照仍在。",flush=True)
     finally:
         window.close()
         wait(lambda:not window.isVisible())
