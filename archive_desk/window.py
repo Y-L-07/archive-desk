@@ -18,12 +18,13 @@ from PySide6.QtWidgets import (
 
 from . import operations
 from .jobs import Job
+from .inbox_ui import InboxPage
 from .core import ScanCancelled, default_rules
 from .demo import create_demo
 from .planning import preview, recheck_plans
 from .quarantine import quarantine_preview
 from .profiles import ProfileStore
-from .scanner import scan
+from .scanner import scan, snapshot_file
 from .file_model import CONFLICTS, FileFilter, FileModel, STATUS, STATUS_COLORS, TYPES, size_text, type_icon
 from .rules_dialog import RulesDialog
 from .theme import STYLE, icon
@@ -156,6 +157,12 @@ class MainWindow(QMainWindow):
         workspace_layout.addWidget(self._footer())
         self.pages.addWidget(self.workspace)
         self.pages.addWidget(self._history())
+        self.inbox = InboxPage(self, journal.path)
+        self.inbox.preview_requested.connect(self._load_inbox)
+        self.inbox.count_changed.connect(lambda count:
+            self.inbox_button.setText(f"收件箱 ({count})" if count else "收件箱"))
+        self.inbox.stopped.connect(self.close)
+        self.pages.addWidget(self.inbox)
         base.addWidget(self.pages, 1)
         self._render_rules()
         self._update_table()
@@ -194,8 +201,9 @@ class MainWindow(QMainWindow):
         row.addSpacing(24)
         self.workspace_button = button("整理工作台", lambda: self.switch_page(0), "workspaceButton")
         self.history_button = button("历史", lambda: self.switch_page(1), "historyButton", "history", "#d2e5d6")
+        self.inbox_button = button("收件箱", lambda: self.switch_page(2), "inboxButton", "archive", "#d2e5d6")
         group = QButtonGroup(frame)
-        for widget in (self.workspace_button, self.history_button):
+        for widget in (self.workspace_button, self.inbox_button, self.history_button):
             widget.setCheckable(True)
             group.addButton(widget)
             row.addWidget(widget)
@@ -478,9 +486,10 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentIndex(index)
         self.workspace_button.setChecked(index == 0)
         self.history_button.setChecked(index == 1)
+        self.inbox_button.setChecked(index == 2)
         if index == 1:
             self.refresh_history(self.active_batch)
-        elif self.needs_scan and self.job is None:
+        elif index == 0 and self.needs_scan and self.job is None:
             self._rescan()
 
     def refresh_history(self, preferred=None):
@@ -564,6 +573,7 @@ class MainWindow(QMainWindow):
 
     def _sync_controls(self):
         idle = self.job is None
+        self.inbox.set_workspace_busy(not idle)
         for widget in (self.open_button, self.demo_button, self.rules_button, self.recursive,
                        self.empty_action):
             widget.setEnabled(idle)
@@ -662,6 +672,10 @@ class MainWindow(QMainWindow):
         self.set_folder(demo)
 
     def set_folder(self, root):
+        self._set_source(root)
+        self._rescan()
+
+    def _set_source(self, root):
         self.root = Path(root)
         self.target_root = self.root
         self.resolutions.clear()
@@ -678,7 +692,44 @@ class MainWindow(QMainWindow):
         self.search.clear()
         self._set_category("全部文件")
         self.filter_buttons["全部文件"].setChecked(True)
-        self._rescan()
+        for combo in self.facets:
+            combo.setCurrentIndex(0)
+
+    def _load_inbox(self, root, candidates):
+        if self.job is not None or not candidates:
+            return
+        previous_target = self.target_root if root == self.root else root
+        self._quarantine_mode(())
+        self._set_source(root)
+        self.target_root = previous_target
+        self.target_path.setText("使用来源目录" if root == previous_target else str(previous_target))
+        self.files = []
+        self._set_plans([])
+        cancel = Event()
+        rules = list(self.rules)
+
+        def build():
+            valid, warnings = [], []
+            for candidate in candidates:
+                try:
+                    current = snapshot_file(candidate.path, cancel)
+                    if current != candidate:
+                        warnings.append(f"{candidate.path}：自入箱后已变化")
+                    else:
+                        valid.append(current)
+                except (OSError, ValueError) as exc:
+                    warnings.append(f"{candidate.path}：{exc}")
+            plans = preview(root, valid, rules, cancel, target_root=previous_target)
+            return valid, plans, warnings
+
+        def loaded(result):
+            self.files, plans, warnings = result
+            self._set_plans(plans)
+            self._note(f"已从收件箱载入 {len(plans)} 项，仅生成预览。"
+                       + (f"有 {len(warnings)} 条提示：{warnings[0]}" if warnings else ""))
+            self.notice.setToolTip("\n".join(warnings))
+
+        self._run(build, loaded, "正在核对收件箱候选并生成预览…", cancel)
 
     def _rescan(self):
         if self.root is None or self.job is not None:
@@ -1052,6 +1103,10 @@ class MainWindow(QMainWindow):
         self.switch_page(1)
         self._note("撤销检查已完成。可在批次明细中查看已撤销项和冲突原因。")
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.inbox.start()
+
     def closeEvent(self, event):
         if self.job is not None:
             if self.cancel_event is not None:
@@ -1059,5 +1114,9 @@ class MainWindow(QMainWindow):
             else:
                 self._note("正在完成当前操作，请稍后关闭窗口。")
             event.ignore()
-        else:
+        elif self.inbox.shutdown():
             event.accept()
+        else:
+            self._note("正在结束收件箱检查…")
+            self.setEnabled(False)
+            event.ignore()
