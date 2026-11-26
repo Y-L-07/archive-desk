@@ -101,8 +101,10 @@ def open_staging(path, *, create):
         yield stream, handle, info
 
 
-def cross_copy_supported(handle, info):
-    if info.st_file_attributes & ~(0x20 | 0x80) or info.st_nlink != 1:
+def cross_copy_supported(handle, info, *, delete_pending=False):
+    # NTFS excludes the link marked for deletion from the handle's link count.
+    expected_links = 0 if delete_pending else 1
+    if info.st_file_attributes & ~(0x20 | 0x80) or info.st_nlink != expected_links:
         raise ValueError("文件带有特殊属性或硬链接，跨卷复制无法保真，请人工处理")
     getinfo = kernel.GetFileInformationByHandleEx
     getinfo.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
@@ -156,9 +158,9 @@ def copy_times(source_handle, target_handle):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def remove_checked_handle(handle):
-    # FileDispositionInfo marks this exact open file for removal at close.
-    delete = wintypes.BOOL(True)
+def set_delete_pending(handle, pending):
+    # FileDispositionInfo sets or clears deletion at close on this exact handle.
+    delete = wintypes.BOOL(pending)
     if not set_information(handle, 4, ctypes.byref(delete), ctypes.sizeof(delete)):
         raise ctypes.WinError(ctypes.get_last_error())
 

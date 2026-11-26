@@ -4,7 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from ._winmove import (copy_times, cross_copy_supported, open_regular, open_staging,
-                       remove_checked_handle, rename_without_replace)
+                       rename_without_replace, set_delete_pending)
 from .core import check_cancel
 from .file_revision import content_digest
 from .move_checks import fingerprint, require_vacant
@@ -82,7 +82,14 @@ def _remove_source(job, source, opened, close_source):
     if fingerprint(source.lstat()) != job.data["file"] or fingerprint(info) != job.data["file"]:
         raise ValueError("移除前源文件的身份或大小、修改时间已变化")
     cross_copy_supported(handle, info)
-    remove_checked_handle(handle)
+    set_delete_pending(handle, True)
+    try:
+        # NTFS shares its default and alternate data streams separately. A new
+        # stream can open after our first check only until deletion is pending.
+        cross_copy_supported(handle, os.fstat(stream.fileno()), delete_pending=True)
+    except BaseException:
+        set_delete_pending(handle, False)
+        raise
     close_source()
     if _present(source):
         raise ValueError("源文件移除尚未确认，请核对两侧")
@@ -111,6 +118,8 @@ def advance(job, source, target, opened, close_source, stack, cancel, *, inspect
             raise ValueError("已提交目标与记录的身份、大小、时间或哈希不一致")
         if copying:
             cross_copy_supported(desthandle, destinfo)
+            if opened:
+                cross_copy_supported(opened[1], opened[2])
         if inspect:
             return "目标已核验；可确认后移除核验一致的源文件" if opened else "目标已核验；可确认完成日志"
         if opened:

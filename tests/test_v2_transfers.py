@@ -154,6 +154,37 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(self.src.read_bytes(), self.content)
         self.assertEqual(ads.read_bytes(), b"important stream")
 
+    def test_ads_created_between_last_check_and_delete_mark_preserves_both_files(self):
+        import ctypes
+        import msvcrt
+        from archive_desk._winmove import INVALID_HANDLE, create_file, extended_path
+
+        archive = self.other_volume()
+        plan, = self.plan(archive)
+        ads = Path(str(self.src) + ":late_stream")
+        real_set_pending = crossvolume.set_delete_pending
+        marks = []
+
+        def inject(handle, pending):
+            marks.append(pending)
+            if pending:
+                # Other software may request FILE_SHARE_DELETE for a *different*
+                # stream even while our checked default-stream handle denies writes.
+                writer = create_file(extended_path(ads), 0x40000000, 7, None, 1, 0, None)
+                if writer == INVALID_HANDLE:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                with os.fdopen(msvcrt.open_osfhandle(writer, os.O_BINARY | os.O_WRONLY), "wb") as stream:
+                    stream.write(b"late metadata to preserve")
+            real_set_pending(handle, pending)
+
+        with patch.object(crossvolume, "set_delete_pending", inject):
+            batch = apply(self.root, [plan], self.j, target_root=archive)
+        self.assertEqual(marks, [True, False])
+        self.assertEqual(self.j.items(batch)[0]["status"], "uncertain")
+        self.assertEqual(self.src.read_bytes(), self.content)
+        self.assertEqual(ads.read_bytes(), b"late metadata to preserve")
+        self.assertEqual(plan.target.read_bytes(), self.content)
+
     def test_pending_recover_reads_only_then_rechecks_current_rule(self):
         plan, = self.plan()
         bid, _ = self.j.begin_batch(self.root, [plan])
