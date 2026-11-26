@@ -157,10 +157,14 @@ class Catalog:
                     raise ValueError("此路径的卷或目录身份与登记信息不同，请核对原设备")
         except (OSError, ValueError) as exc:
             problem = str(exc)
-        with database_connection(self.path) as db:
-            reason = problem or (root["problem"] if root["online"] else "")
-            db.execute("UPDATE catalog_roots SET online=?,problem=? WHERE id=? AND path=? AND revision=?",
-                       (int(not problem), reason, root_id, root["path"], root["revision"]))
+        # An identity check needs only attribute access. It must not clear a
+        # scan error such as permission denied while enumerating this root.
+        reason = problem or (root["problem"] if root["online"] else "")
+        availability = int(not problem)
+        if (availability, reason) != (root["online"], root["problem"]):
+            with database_connection(self.path) as db:
+                db.execute("UPDATE catalog_roots SET online=?,problem=? WHERE id=? AND path=? AND revision=?",
+                           (availability, reason, root_id, root["path"], root["revision"]))
         return not problem
 
     def rebind(self, root_id, path, *, confirmed=False):

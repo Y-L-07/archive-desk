@@ -100,6 +100,7 @@ class CatalogIndexTests(unittest.TestCase):
         self.assertEqual(self.cat.roots()[0]["scan_state"], "failed")
         self.assertEqual(self.cat.roots()[0]["indexed_at"], old["indexed_at"])
         self.assertEqual(self.files(), before)
+        self.assertTrue(self.cat.probe(self.rid))
         self.assertIn("拒绝", self.cat.roots()[0]["problem"])
 
     def test_staged_refresh_cannot_overwrite_committed_transfer_generation(self):
