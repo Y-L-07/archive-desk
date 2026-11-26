@@ -23,6 +23,8 @@ class Journal:
         self.path = Path(db_path).absolute()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] > 3:
+                raise ValueError("此数据库由更新版本的归档台创建，请使用相应版本打开")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS batches (
                     id INTEGER PRIMARY KEY, root TEXT NOT NULL, created_at TEXT NOT NULL
@@ -44,7 +46,9 @@ class Journal:
                     if column not in existing:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
             db.execute("UPDATE batches SET target_root=root WHERE target_root IS NULL")
-            db.execute("PRAGMA user_version=2")
+            from .catalog import ensure_catalog_schema
+            ensure_catalog_schema(db)
+            db.execute("PRAGMA user_version=3")
 
     def _connection(self):
         return database_connection(self.path)
@@ -75,6 +79,9 @@ class Journal:
                   direction, phase, json.dumps(transfer) if transfer is not None else None, item_id, previous))
             if result.rowcount != 1:
                 raise RuntimeError("操作日志状态已变化，请查看历史记录")
+            if phase == "done" and (direction, status) in (("apply", "moved"), ("undo", "undone")):
+                from .catalog_events import committed_transfer
+                committed_transfer(db, item_id, transfer)
 
     def recover(self, rules=None) -> int:
         """Called after acquiring the application's single-instance lock."""
