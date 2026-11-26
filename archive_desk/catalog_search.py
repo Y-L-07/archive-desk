@@ -36,7 +36,7 @@ _FIELDS = """SELECT f.*,r.name AS root_name,r.path AS root_path,r.online,
 
 def _where(filters):
     known = {"text","ext","date_from","date_to","min_size","max_size","tag",
-             "online","favorite","root_id","directory"}
+             "online","favorite","root_id","directory","ext_exact","directory_bucket"}
     if set(filters) - known:
         raise ValueError("含有无法识别的搜索条件")
     clauses, args = ["f.active=1"], []
@@ -49,6 +49,29 @@ def _where(filters):
     ext = str(filters.get("ext") or "").strip().lower()
     if ext:
         term("f.ext=?", "." + ext.lstrip("."))
+    if "ext_exact" in filters:
+        value = filters["ext_exact"]
+        if not isinstance(value, str):
+            raise ValueError("精确扩展名须为文本，可以是空字符串")
+        term("f.ext=?", value)
+    if "directory_bucket" in filters:
+        bucket = filters["directory_bucket"]
+        if not isinstance(bucket, dict) or set(bucket) != {"depth", "path"}:
+            raise ValueError("目录统计筛选条件无效")
+        depth, folder = bucket["depth"], bucket["path"]
+        if type(depth) is not int or not 1 <= depth <= 32 or not isinstance(folder,str):
+            raise ValueError("目录统计层级须为 1 至 32 的整数")
+        parts = folder.split("/") if folder else []
+        if len(parts)>depth or "\\" in folder or any(p in ("",".","..") for p in parts):
+            raise ValueError("目录统计路径超出所选层级")
+        # Binary equality keeps literal %, _, ^ and case-sensitive NTFS names
+        # aligned with GROUP BY. A shallower bucket contains direct files only.
+        if folder:
+            prefix = folder + "/"
+            clauses.append("substr(f.relpath,1,?)=? COLLATE BINARY")
+            args.extend((len(prefix), prefix))
+        if len(parts)<depth:
+            term("instr(substr(f.relpath,?),'/')=0", len(folder)+2 if folder else 1)
     if filters.get("directory") is not None:
         term("f.relpath LIKE ? ESCAPE '^'", str(filters["directory"]).replace("^","^^")
              .replace("%","^%").replace("_","^_").rstrip("/") + "/%")
