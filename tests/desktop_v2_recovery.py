@@ -14,6 +14,19 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 NAME = "跨卷恢复样例.pdf"
 STAGES = ("copy_chunk", "committed")
+TAG = "恢复验收"
+NOTE = "移动前添加的跨卷备注"
+
+
+def indexed_at(search, entry_id, root_id, relpath, sha):
+    # Each side is indexed before the move. No refresh is performed later:
+    # only a *confirmed* journal transition may change the indexed location.
+    result = search.search()
+    assert result["total"] == 1, result
+    row, = result["rows"]
+    assert (row["id"], row["root_id"], row["relpath"], row["digest"]) == (
+        entry_id, root_id, relpath, sha), row
+    assert row["tags"] == [TAG] and row["note"] == NOTE and row["favorite"], row
 
 
 def digest(path):
@@ -40,13 +53,14 @@ def crash_state(item, stage, source, target, sha):
     return temp
 
 
-def drive_window(action, stage, scratch, destination, sha):
+def drive_window(action, stage, scratch, destination, sha, source_id, target_id, entry_id):
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QAbstractButton, QApplication, QFileDialog, QMessageBox
 
     import main as desktop
     from archive_desk import crossvolume
+    from archive_desk.catalog_search import CatalogSearch
     from archive_desk.window import MainWindow
 
     source_root = scratch / "资料"
@@ -70,6 +84,7 @@ def drive_window(action, stage, scratch, destination, sha):
             app = QApplication.instance()
             window = next(w for w in app.topLevelWidgets() if isinstance(w, MainWindow))
             journal = window.journal
+            search = CatalogSearch(journal.path)
             assert app.platformName() == "windows" and window.isVisible()
             wait_for(lambda: window.windowHandle().isExposed())
 
@@ -112,6 +127,7 @@ def drive_window(action, stage, scratch, destination, sha):
                 plan, = window.model.plans
                 assert plan.target == target and plan.file.path == source and plan.status == "ready"
                 assert digest(source) == sha and not target.exists()
+                indexed_at(search, entry_id, source_id, NAME, sha)
                 click("selectVisibleButton")
 
                 def cut_power(at, item_id):
@@ -132,17 +148,21 @@ def drive_window(action, stage, scratch, destination, sha):
 
                 wait_for(lambda: item()["status"] == "resumable")
                 temporary = crash_state(item(), stage, source, target, sha)
+                indexed_at(search, entry_id, source_id, NAME, sha)
                 # Recovery on startup only classifies. The click explicitly allows
                 # continuing this task, and the source survives until then.
                 confirm_click("resumeButton", "确认继续")
                 wait_for(lambda: item()["status"] == "moved" and window.job is None)
                 assert not source.exists() and digest(target) == sha
                 assert not temporary.exists()
+                indexed_at(search, entry_id, target_id, target.relative_to(destination).as_posix(), sha)
                 confirm_click("undoButton", "确认撤销")
                 wait_for(lambda: item()["status"] == "undone" and window.job is None)
                 assert digest(source) == sha and not target.exists()
                 assert not temporary.exists()
-                print(f"{stage}：已从历史确认继续，跨卷撤销后原位置 SHA-256 一致。", flush=True)
+                indexed_at(search, entry_id, source_id, NAME, sha)
+                print(f"{stage}：启动探测保持原索引；显式继续及撤销后，索引、标签、备注、收藏、SHA-256 一致。",
+                      flush=True)
                 window.close()
                 app.exit(0)
         except BaseException:
@@ -159,6 +179,8 @@ def drive_window(action, stage, scratch, destination, sha):
 
 
 def verify_both_volumes(target_parent):
+    from archive_desk.catalog import Catalog
+    from archive_desk.catalog_search import CatalogSearch
     from archive_desk.journal import Journal
 
     for stage in STAGES:
@@ -173,10 +195,23 @@ def verify_both_volumes(target_parent):
             target = destination / "文档" / NAME
             source.write_bytes(bytes(range(256)) * 12289)
             sha = digest(source)
+            db_path = scratch / "state/history.sqlite3"
+            catalog = Catalog(db_path)
+            source_id = catalog.add_root("临时来源库", source_root)
+            target_id = catalog.add_root("临时目标库", destination)
+            for root_id in (source_id, target_id):
+                assert catalog.refresh(root_id, hash_files=True)["published_state"] == "complete"
+            search = CatalogSearch(db_path)
+            entry, = search.search()["rows"]
+            entry_id = entry["id"]
+            search.add_tags([entry_id], [TAG])
+            search.annotate(entry_id, note=NOTE, favorite=True)
+            indexed_at(search, entry_id, source_id, NAME, sha)
             env = dict(os.environ, ARCHIVE_DESK_DATA_DIR=str(scratch / "state"), QT_QPA_PLATFORM="windows")
             def child(action):
                 return subprocess.run([sys.executable, __file__, "--window", action, stage,
-                                       str(scratch), str(destination), sha], env=env, cwd=PROJECT,
+                                       str(scratch), str(destination), sha,
+                                       str(source_id), str(target_id), str(entry_id)], env=env, cwd=PROJECT,
                                       timeout=110).returncode
 
             assert child("interrupt") == 73, f"未到达预期中断点：{stage}"
@@ -184,14 +219,17 @@ def verify_both_volumes(target_parent):
             batch, = journal.batches()
             item, = journal.items(batch["id"])
             crash_state(item, stage, source, target, sha)
+            indexed_at(search, entry_id, source_id, NAME, sha)
             assert child("recover") == 0, "窗口恢复验收失败"
             assert digest(source) == sha and not target.exists()
+            indexed_at(search, entry_id, source_id, NAME, sha)
             assert all(not p.is_file() for p in destination.rglob("*"))
             assert [p for p in source_root.rglob("*") if p.is_file()] == [source]
 
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--window"]:
-        _, _, action, stage, scratch, target, sha = sys.argv
-        sys.exit(drive_window(action, stage, Path(scratch), Path(target), sha))
+        _, _, action, stage, scratch, target, sha, source_id, target_id, entry_id = sys.argv
+        sys.exit(drive_window(action, stage, Path(scratch), Path(target), sha,
+                              int(source_id), int(target_id), int(entry_id)))
     verify_both_volumes(Path(sys.argv[1]).absolute() if len(sys.argv) == 2 else PROJECT)
