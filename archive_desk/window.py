@@ -2,18 +2,16 @@
 import sqlite3
 from collections import Counter
 from dataclasses import replace
-from math import ceil
 from pathlib import Path
 from threading import Event
 from time import monotonic
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
     QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
-    QTableView, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QTableView, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from . import operations
@@ -28,6 +26,7 @@ from .scanner import scan, snapshot_file
 from .file_model import CONFLICTS, FileFilter, FileModel, STATUS, STATUS_COLORS, TYPES, size_text, type_icon
 from .rules_dialog import RulesDialog
 from .theme import STYLE, icon
+from .text_widgets import PathLabel
 
 
 def label(text="", name="", wrap=False):
@@ -64,29 +63,6 @@ def separator():
     widget.setObjectName("line")
     widget.setFixedHeight(1)
     return widget
-
-
-class PathLabel(QTextEdit):
-    """长路径可在任意字符处折行，复制时保留原文。"""
-    def __init__(self):
-        super().__init__()
-        self.setReadOnly(True)
-        self.setAcceptRichText(False)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.setMinimumWidth(0)
-        self.document().setDocumentMargin(0)
-        self.setWordWrapMode(QTextOption.WrapMode.WrapAnywhere)
-        self.document().documentLayout().documentSizeChanged.connect(self._fit)
-
-    def _fit(self, size):
-        self.setFixedHeight(ceil(size.height()) + 2)
-
-    def setText(self, text):
-        self.setPlainText(text)
-        self.setToolTip(text)
 
 
 class MainWindow(QMainWindow):
@@ -163,6 +139,8 @@ class MainWindow(QMainWindow):
             self.inbox_button.setText(f"收件箱 ({count})" if count else "收件箱"))
         self.inbox.stopped.connect(self.close)
         self.pages.addWidget(self.inbox)
+        self.catalog = None
+        self.pages.addWidget(QWidget())
         base.addWidget(self.pages, 1)
         self._render_rules()
         self._update_table()
@@ -202,8 +180,9 @@ class MainWindow(QMainWindow):
         self.workspace_button = button("整理工作台", lambda: self.switch_page(0), "workspaceButton")
         self.history_button = button("历史", lambda: self.switch_page(1), "historyButton", "history", "#d2e5d6")
         self.inbox_button = button("收件箱", lambda: self.switch_page(2), "inboxButton", "archive", "#d2e5d6")
+        self.catalog_button = button("档案库", lambda: self.switch_page(3), "catalogButton", "all", "#d2e5d6")
         group = QButtonGroup(frame)
-        for widget in (self.workspace_button, self.inbox_button, self.history_button):
+        for widget in (self.workspace_button, self.catalog_button, self.inbox_button, self.history_button):
             widget.setCheckable(True)
             group.addButton(widget)
             row.addWidget(widget)
@@ -447,6 +426,8 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(label("操作历史", "title"))
         row.addStretch()
+        self.link_archive = button("查看关联档案",self.history_to_archive,"historyArchiveButton")
+        row.addWidget(self.link_archive)
         self.resume_button = button("继续可安全项", self.resume_current, "resumeButton", "arrow")
         row.addWidget(self.resume_button)
         self.undo_button = button("撤销此批", self.undo_current, "undoButton", "undo")
@@ -483,7 +464,10 @@ class MainWindow(QMainWindow):
         return table
 
     def switch_page(self, index):
+        if index == 3:
+            self.ensure_catalog().reload()
         self.pages.setCurrentIndex(index)
+        self.catalog_button.setChecked(index == 3)
         self.workspace_button.setChecked(index == 0)
         self.history_button.setChecked(index == 1)
         self.inbox_button.setChecked(index == 2)
@@ -491,6 +475,34 @@ class MainWindow(QMainWindow):
             self.refresh_history(self.active_batch)
         elif index == 0 and self.needs_scan and self.job is None:
             self._rescan()
+
+    def ensure_catalog(self):
+        if self.catalog is None:
+            from .catalog_ui import CatalogPage
+            page = CatalogPage(self)
+            placeholder = self.pages.widget(3)
+            self.pages.removeWidget(placeholder)
+            placeholder.deleteLater()
+            self.pages.insertWidget(3,page)
+            self.catalog = page
+            self.catalog.stopped.connect(self.close)
+        return self.catalog
+
+    def show_history_item(self,batch_id,item_id):
+        self.active_batch = batch_id
+        self.switch_page(1)
+        for i in range(self.item_table.rowCount()):
+            if self.item_table.item(i,0).data(Qt.ItemDataRole.UserRole)==item_id:
+                self.item_table.selectRow(i)
+                self.item_table.scrollToItem(self.item_table.item(i,0))
+                break
+
+    def history_to_archive(self):
+        row = self.item_table.currentRow()
+        if row<0 or self.job is not None:
+            return
+        item_id = self.item_table.item(row,0).data(Qt.ItemDataRole.UserRole)
+        self.ensure_catalog().open_from_item(item_id)
 
     def refresh_history(self, preferred=None):
         batches = self.journal.batches()
@@ -547,6 +559,10 @@ class MainWindow(QMainWindow):
                 status = "撤销冲突"
             self._set_log_row(self.item_table, i, [status, record["source"], record["target"],
                                                    record["rule"], record["reason"] or "—"])
+            self.item_table.item(i,0).setData(Qt.ItemDataRole.UserRole,record["id"])
+        self.link_archive.setEnabled(bool(items) and self.job is None)
+        if items and self.item_table.currentRow()<0:
+            self.item_table.selectRow(0)
         self.batch_title.setText(f"批次 #{self.active_batch} 明细" if valid else "批次明细")
         if valid:
             self.history_hint.setText(f"共 {self.batch_table.rowCount()} 个批次   ·   当前批次有 {undo_count} 项可撤销")
@@ -574,6 +590,9 @@ class MainWindow(QMainWindow):
     def _sync_controls(self):
         idle = self.job is None
         self.inbox.set_workspace_busy(not idle)
+        if self.catalog is not None:
+            self.catalog.setEnabled(idle)
+        self.catalog_button.setEnabled(idle)
         for widget in (self.open_button, self.demo_button, self.rules_button, self.recursive,
                        self.empty_action):
             widget.setEnabled(idle)
@@ -593,6 +612,7 @@ class MainWindow(QMainWindow):
         self.exit_quarantine.setEnabled(idle)
         if not idle:
             self.undo_button.setEnabled(False)
+            self.link_archive.setEnabled(False)
             self.resume_button.setEnabled(False)
         self.stop_button.setVisible(not idle and self.cancel_event is not None)
         self.stop_button.setEnabled(self.cancel_event is not None and not self.cancel_event.is_set())
@@ -616,12 +636,13 @@ class MainWindow(QMainWindow):
         review = counts.get("review",0) + counts.get("uncertain",0)
         self.stats_label.setText(f"成功 {success}   跳过 {skipped}   失败 {failed}   待核对 {review}")
 
-    def _run(self, task, success, progress, cancel=None, finish_on_cancel=False):
+    def _run(self, task, success, progress, cancel=None, finish_on_cancel=False, interrupted=None):
         if self.job is not None:
             return
         self.cancel_event = cancel
         self.job = Job(self, task)
         self._on_success = success
+        self._interrupted = interrupted
         self.job.finished.connect(self._job_finished)
         self.finish_on_cancel = finish_on_cancel
         self.progress_title = progress.rstrip("…")
@@ -636,6 +657,8 @@ class MainWindow(QMainWindow):
     def _job_finished(self):
         job = self.job
         callback = self._on_success
+        interrupted = self._interrupted
+        self._interrupted = None
         cancelled = self.cancel_event is not None and self.cancel_event.is_set()
         self.job = self.cancel_event = self._on_success = None
         self.progress_panel.hide()
@@ -645,7 +668,10 @@ class MainWindow(QMainWindow):
             invalidator()
         self._sync_controls()
         self._note()
-        if (cancelled and not self.finish_on_cancel) or isinstance(job.error, ScanCancelled):
+        stopped = (cancelled and not self.finish_on_cancel) or isinstance(job.error, ScanCancelled)
+        if interrupted is not None and (stopped or job.error):
+            interrupted(stopped, job.error)
+        elif stopped:
             self._note("已取消。点击「重新扫描」可再次查看此文件夹。")
         elif job.error:
             self._note(f"操作未完成：{job.error}。可查看历史或重新扫描。")
@@ -696,6 +722,9 @@ class MainWindow(QMainWindow):
             combo.setCurrentIndex(0)
 
     def _load_inbox(self, root, candidates):
+        self._load_candidates(root,candidates,"收件箱")
+
+    def _load_candidates(self, root, candidates, origin):
         if self.job is not None or not candidates:
             return
         previous_target = self.target_root if root == self.root else root
@@ -714,7 +743,7 @@ class MainWindow(QMainWindow):
                 try:
                     current = snapshot_file(candidate.path, cancel)
                     if current != candidate:
-                        warnings.append(f"{candidate.path}：自入箱后已变化")
+                        warnings.append(f"{candidate.path}：自记录后已变化")
                     else:
                         valid.append(current)
                 except (OSError, ValueError) as exc:
@@ -725,11 +754,11 @@ class MainWindow(QMainWindow):
         def loaded(result):
             self.files, plans, warnings = result
             self._set_plans(plans)
-            self._note(f"已从收件箱载入 {len(plans)} 项，仅生成预览。"
+            self._note(f"已从{origin}载入 {len(plans)} 项，仅生成预览。"
                        + (f"有 {len(warnings)} 条提示：{warnings[0]}" if warnings else ""))
             self.notice.setToolTip("\n".join(warnings))
 
-        self._run(build, loaded, "正在核对收件箱候选并生成预览…", cancel)
+        self._run(build, loaded, f"正在核对{origin}条目并生成预览…", cancel)
 
     def _rescan(self):
         if self.root is None or self.job is not None:
@@ -1113,6 +1142,10 @@ class MainWindow(QMainWindow):
                 self._cancel_scan()
             else:
                 self._note("正在完成当前操作，请稍后关闭窗口。")
+            event.ignore()
+        elif self.catalog is not None and not self.catalog.search.shutdown():
+            self._note("正在结束档案检索…")
+            self.setEnabled(False)
             event.ignore()
         elif self.inbox.shutdown():
             event.accept()
