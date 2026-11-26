@@ -91,6 +91,8 @@ class BackupFormatTests(unittest.TestCase):
             assert_separate(other,link)
         with patch("archive_desk.backup_paths._disk_numbers",side_effect=OSError):
             self.assertIn("无法确认",disk_note(self.repo,other))
+        with patch("archive_desk.backup_paths._disk_numbers",side_effect=[{0},{1}]):
+            self.assertIn("无法进一步确认",disk_note(self.repo,other))
         folder = self.obj.parent
         outside = other / "对象"
         folder.rename(outside)

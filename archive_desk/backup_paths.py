@@ -89,4 +89,4 @@ def disk_note(a, b):
         return "无法确认源与目标是否位于不同物理磁盘。"
     if shared:
         return "源与目标位于同一物理磁盘或共用磁盘，此备份不能防止该盘故障。"
-    return "Windows 报告源卷与目标卷使用不同的磁盘设备。"
+    return "Windows 报告两个卷使用不同磁盘设备；无法进一步确认底层物理介质是否独立。"
