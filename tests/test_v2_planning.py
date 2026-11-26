@@ -6,7 +6,9 @@ import unittest
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
+from archive_desk import planning
 from archive_desk.core import Rule, default_rules, directory_identity, validate_rule
 from archive_desk.planning import preview, recheck_plans, rule_is_current
 from archive_desk.profiles import ProfileStore, export_profile, import_profile
@@ -37,6 +39,48 @@ class V2Plans(unittest.TestCase):
     def preview(self, rules=None, resolutions=None):
         return preview(self.root, scan(self.root, True), rules or [self.rule],
                        target_root=self.target, resolutions=resolutions)
+
+    @unittest.skipUnless(os.name == "nt", "Windows 目录联接")
+    def test_replaced_cached_parent_blocks_child_stat_and_listing(self):
+        import _winapi
+        inspected = self.target / "待归档"
+        inspected.mkdir()
+        outside = self.scratch / "独立样例"
+        (outside / "月份").mkdir(parents=True)
+        inspection = planning._PathInspection(self.target)
+        inspection.chain(self.target, inspected, False)
+        inspected.rename(self.target / "先前目录")
+        _winapi.CreateJunction(str(outside), str(inspected))
+        child = inspected / "月份"
+        with (patch.object(planning, "directory_identity", wraps=directory_identity) as identify,
+              patch.object(Path, "iterdir", autospec=True) as listing):
+            with self.assertRaises(ValueError):
+                inspection.chain(self.target, child, False)
+            with self.assertRaises(ValueError):
+                inspection.child_names(inspected)
+            self.assertNotIn(child, [call.args[0] for call in identify.call_args_list])
+            listing.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows 目录共享模式")
+    def test_ancestor_is_locked_during_listing_and_names_are_cached(self):
+        parent = self.target / "归档"
+        month = parent / "五月"
+        month.mkdir(parents=True)
+        (month / "memo.txt").write_bytes(b"sample")
+        inspection = planning._PathInspection(self.target)
+        inspection.chain(self.target, month, False)
+        original = Path.iterdir
+
+        def checked_listing(folder):
+            self.assertEqual(folder, month)
+            with self.assertRaises(PermissionError):
+                parent.rename(self.target / "已移开")
+            return original(folder)
+
+        with patch.object(Path, "iterdir", autospec=True, side_effect=checked_listing) as listing:
+            self.assertIn("memo.txt", inspection.child_names(month))
+            self.assertIn("memo.txt", inspection.child_names(month))
+            self.assertEqual(listing.call_count, 1)
 
     def test_combined_conditions_priority_trial_and_readonly_target(self):
         item = self.write("收件/外地/Inv-000.PDF")

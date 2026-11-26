@@ -3,7 +3,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime
 from fnmatch import fnmatchcase
@@ -75,22 +75,42 @@ class _PathInspection:
         for root in dict.fromkeys(roots):
             if ".." in root.parts:
                 raise ValueError("所选根目录含无效的相对路径")
-            for ancestor in reversed(root.parents):
-                directory_identity(ancestor)
-            self.directories[root] = directory_identity(root)
+            with self._pinned_directory(root) as identity:
+                self.directories[root] = identity
+
+    @contextmanager
+    def _pinned_directory(self, folder):
+        # Lock from the volume root down. Only resolve a child after proving
+        # its parent is an ordinary directory and keeping that parent pinned.
+        with ExitStack() as stack:
+            for path in (*reversed(folder.parents), folder):
+                stack.enter_context(pin_snapshot_entry(path))
+                identity = directory_identity(path)
+                if path in self.directories and self.directories[path] != identity:
+                    raise ValueError(f"目录在预览期间被替换：{path}")
+                self.directories[path] = identity
+            yield identity
+
+    def _names_while_pinned(self, folder):
+        if folder not in self.names:
+            self.names[folder] = {p.name.casefold() for p in folder.iterdir()}
+        return self.names[folder]
 
     def child_names(self, folder):
         if folder not in self.names:
-            # A checked folder could have been swapped with a junction since
-            # chain() inspected it. Pin and recheck every parent before listing.
-            with ExitStack() as stack:
-                for parent in (*reversed(folder.parents), folder):
-                    stack.enter_context(pin_snapshot_entry(parent))
-                    identity = directory_identity(parent)
-                    if parent in self.directories and self.directories[parent] != identity:
-                        raise ValueError(f"目录在预览期间被替换：{parent}")
-                self.names[folder] = {p.name.casefold() for p in folder.iterdir()}
+            with self._pinned_directory(folder):
+                return self._names_while_pinned(folder)
         return self.names[folder]
+
+    def _inspect_child(self, path):
+        with self._pinned_directory(path.parent):
+            try:
+                with pin_snapshot_entry(path):
+                    return directory_identity(path)
+            except FileNotFoundError:
+                if path.name.casefold() in self._names_while_pinned(path.parent):
+                    raise ValueError(f"目录名称大小写冲突：{path}")
+                return None
 
     def chain(self, root, folder, allow_missing):
         if not folder.is_relative_to(root):
@@ -103,12 +123,7 @@ class _PathInspection:
         for part in parts:
             path = path / part
             if path not in self.directories:
-                try:
-                    self.directories[path] = directory_identity(path)
-                except FileNotFoundError:
-                    if part.casefold() in self.child_names(path.parent):
-                        raise ValueError(f"目录名称大小写冲突：{path}")
-                    self.directories[path] = None
+                self.directories[path] = self._inspect_child(path)
             existing = self.directories[path]
             if existing is None:
                 if allow_missing:
