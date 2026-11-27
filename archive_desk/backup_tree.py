@@ -143,3 +143,19 @@ class VersionTree(QAbstractItemModel):
             elif node.state==Qt.CheckState.PartiallyChecked:
                 work.extend(node.children)
         return result
+
+    def select_file(self, path):
+        if self.root is None:
+            return
+        current = self.index(0, 0)
+        self.setData(current, Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
+        prefix = ""
+        for part in path.split("/"):
+            prefix = f"{prefix}/{part}" if prefix else part
+            children = current.internalPointer().children
+            node = next((child for child in children if child.path == prefix), None)
+            if node is None:
+                return
+            current = self.index(node.row, 0, current)
+        self.setData(current, Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole)
+        return current

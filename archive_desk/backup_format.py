@@ -125,13 +125,14 @@ def validate_manifest(data, expected_id):
     return data
 
 
-def read_manifest(repo, version_id):
+def read_manifest(repo, version_id, *, retired=False):
     version_id = _id(version_id)
     repo = Path(repo)
     with ExitStack() as stack:
         pin_path(stack, repo / "versions")
         read_marker(repo)
-        document = _read(repo / "versions" / (version_id + ".json"), MAX_MANIFEST_BYTES)
+        suffix = ".retired" if retired else ".json"
+        document = _read(repo / "versions" / (version_id + suffix), MAX_MANIFEST_BYTES)
         checksum = _read(repo / "versions" / (version_id + ".sha256"), 80)
         if checksum.strip() != hashlib.sha256(document).hexdigest().encode("ascii"):
             raise ValueError("版本清单 SHA-256 校验不符")

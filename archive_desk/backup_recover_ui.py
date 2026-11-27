@@ -1,13 +1,18 @@
 """版本浏览、恢复预览与无覆盖恢复的前台控件。"""
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel, QSplitter,
-                               QTabWidget, QTreeView, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog,
+                               QLabel, QLineEdit, QMenu, QSplitter, QTabWidget, QTreeView,
+                               QVBoxLayout, QWidget)
+from shiboken6 import isValid
 
 from .backup_format import read_manifest
 from .backup_restore import prepare_restore, restore
+from .backup_tools import (compare_versions, copy_repository, export_restore_plan,
+                           retired_versions, search_version, set_retired)
 from .backup_tree import VersionTree, build_tree
 from .catalog_widgets import button, local_time, records_table
 
@@ -45,6 +50,7 @@ class RecoveryTab(QWidget):
         self.repo = self.destination = self.plan = None
         self.versions = []
         self.version_issues = []
+        self.pending_search = None
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         self.repo_label = text_label("导入已有仓库后，可按日期浏览版本。")
@@ -57,6 +63,16 @@ class RecoveryTab(QWidget):
         version_row.addWidget(self.version,1)
         self.verify_button = button("验证此仓库","verifyBackupFromTree",page.verify_imported)
         version_row.addWidget(self.verify_button)
+        self.search_button = button("搜索备份…","searchBackup",self.search_files)
+        version_row.addWidget(self.search_button)
+        self.manage = button("仓库操作","manageBackup",lambda:None)
+        menu = QMenu(self.manage)
+        menu.addAction("比较两个版本…",self.compare)
+        menu.addAction("删除当前版本（可找回）…",self.retire)
+        menu.addAction("找回已删除版本…",self.reinstate)
+        menu.addAction("复制仓库…",self.copy)
+        self.manage.setMenu(menu)
+        version_row.addWidget(self.manage)
         layout.addLayout(version_row)
         self.version_info = text_label()
         self.version_info.setObjectName("muted")
@@ -83,7 +99,7 @@ class RecoveryTab(QWidget):
         action_row.addWidget(QLabel("同名冲突"))
         self.conflicts = QComboBox()
         self.conflicts.setObjectName("restoreConflict")
-        self.conflicts.addItem("跳过已有名称","skip")
+        self.conflicts.addItem("只恢复缺失文件（跳过已有名称）","skip")
         self.conflicts.addItem("编号另存","rename")
         self.conflicts.currentIndexChanged.connect(self.invalidate)
         action_row.addWidget(self.conflicts)
@@ -94,6 +110,8 @@ class RecoveryTab(QWidget):
         self.apply.setProperty("primary",True)
         action_row.addWidget(self.apply)
         right.addLayout(action_row)
+        self.export_button = button("导出恢复清单…","exportRestorePlan",self.export)
+        right.addWidget(self.export_button)
         self.summary = text_label()
         self.summary.setObjectName("restoreSummary")
         right.addWidget(self.summary)
@@ -113,6 +131,7 @@ class RecoveryTab(QWidget):
         self.invalidate()
 
     def set_repository(self, repo, versions):
+        self.pending_search = None
         self.repo = repo
         self.repo_label.setText(f"仓库　{repo}")
         self.versions = versions
@@ -149,6 +168,18 @@ class RecoveryTab(QWidget):
             root,self.version_issues = result
             self.tree_model.replace(root)
             self.tree.expand(self.tree_model.index(0,0))
+            if self.pending_search:
+                version, path = self.pending_search
+                self.pending_search = None
+                if version == version_id:
+                    index = self.tree_model.select_file(path)
+                    if index is not None:
+                        parent = index.parent()
+                        while parent.isValid():
+                            self.tree.expand(parent)
+                            parent = parent.parent()
+                        self.tree.setCurrentIndex(index)
+                        self.tree.scrollTo(index)
             self.issues.replace(self.version_issues)
             if self.version_issues:
                 self.version_info.setText(self.version_info.text()+f"　·　备份时遗漏 {len(self.version_issues):,} 项")
@@ -165,6 +196,9 @@ class RecoveryTab(QWidget):
         self.plan = None
         self.rows.replace([])
         self.apply.setEnabled(False)
+        self.export_button.setEnabled(False)
+        self.search_button.setEnabled(any(v["status"] != "damaged" for v in self.versions))
+        self.manage.setEnabled(self.repo is not None)
         self.verify_button.setEnabled(self.repo is not None)
         paths = self.tree_model.selected_paths()
         chosen = paths is None or bool(paths)
@@ -179,6 +213,7 @@ class RecoveryTab(QWidget):
         def ready(plan):
             self.plan = plan
             self.rows.replace(plan.entries)
+            self.export_button.setEnabled(True)
             self.results.setCurrentIndex(0)
             counts = Counter(e.action for e in plan.entries)
             byte_total = sum(e.size for e in plan.entries if e.action in ("restore","rename"))
@@ -187,6 +222,136 @@ class RecoveryTab(QWidget):
             self.apply.setEnabled(any(e.action in ("create_dir","restore","rename") for e in plan.entries))
         self.page.task("正在计算恢复预览…",lambda cancel,progress:prepare_restore(
             repo,vid,dest,paths,conflict=mode,cancel=cancel,progress=progress),ready)
+
+    def export(self):
+        plan = self.plan
+        if not plan:
+            return
+        target, _ = QFileDialog.getSaveFileName(self,"导出恢复清单","恢复清单.csv","CSV (*.csv)")
+        if target:
+            self.page.task("正在导出恢复清单…",lambda *_:export_restore_plan(Path(target),plan),
+                           lambda _:self.page.window._note("恢复清单已保存。"))
+
+    def search_files(self):
+        opened_repo = self.repo
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setWindowTitle("搜索备份版本")
+        dialog.resize(800,480)
+        layout = QVBoxLayout(dialog)
+        row = QHBoxLayout()
+        fields = []
+        for placeholder in ("文件名或路径","扩展名，如 pdf","修改日期从 YYYY-MM-DD","修改日期到 YYYY-MM-DD"):
+            field = QLineEdit()
+            field.setPlaceholderText(placeholder)
+            row.addWidget(field)
+            fields.append(field)
+        layout.addLayout(row)
+        table, model = records_table(dialog, [("版本",lambda r:r[0],155),
+                                               ("文件路径",lambda r:r[2],None)],"backupSearchResults")
+        layout.addWidget(table)
+        status = text_label()
+        layout.addWidget(status)
+        def run():
+            if self.repo != opened_repo:
+                status.setText("仓库已切换，请重新打开搜索。")
+                return
+            criteria = [f.text().strip() for f in fields]
+            repo = self.repo
+            versions = [v for v in self.versions if v["status"] != "damaged"]
+            model.replace([])
+            def work(cancel, progress):
+                from .core import check_cancel
+                matches = []
+                for index, version in enumerate(versions):
+                    check_cancel(cancel)
+                    progress(index,len(versions),version["id"])
+                    manifest = read_manifest(repo,version["id"])
+                    for file in search_version(manifest,*criteria):
+                        matches.append((date_text(version["created_at"]),version["id"],file["path"]))
+                        if len(matches) == 5000:
+                            return matches
+                return matches
+            def ready(matches):
+                if isValid(dialog) and dialog.isVisible():
+                    model.replace(matches)
+                    status.setText(f"找到 {len(matches):,} 项" if len(matches) < 5000 else "显示前 5,000 项，请缩小搜索范围。")
+            def failed(stopped,error):
+                if isValid(dialog) and dialog.isVisible():
+                    status.setText("搜索已取消。" if stopped else f"搜索失败：{error}")
+            status.setText("正在搜索…")
+            # A modal dialog would prevent the main window's cancel button from acting.
+            self.page.task("正在搜索备份…",work,ready,failed=failed)
+        def locate(index):
+            if self.repo != opened_repo or self.page.window.job is not None:
+                return
+            _, vid, path = model.records[index.row()]
+            combo_index = self.version.findData(vid)
+            if combo_index < 0:
+                status.setText("该版本已从仓库列表移出，请重新搜索。")
+                return
+            self.pending_search = (vid,path)
+            dialog.close()
+            if combo_index == self.version.currentIndex():
+                self.load_version()
+            else:
+                self.version.setCurrentIndex(combo_index)
+        table.doubleClicked.connect(locate)
+        row.addWidget(button("搜索","runBackupSearch",run))
+        layout.addWidget(text_label("双击结果以选择要恢复的文件。"))
+        dialog.show()
+
+    def compare(self):
+        current = self.version.currentIndex()
+        candidates = [v for i,v in enumerate(self.versions) if i != current and v["status"] != "damaged"]
+        if current < 0 or self.versions[current]["status"] == "damaged" or not candidates:
+            self.page.window._note("比较需要两个可读取的备份版本。")
+            return
+        versions = {f"{date_text(v['created_at'])} · {v['id'][:8]}":v for v in candidates}
+        choice, ok = QInputDialog.getItem(self,"比较备份版本","与当前版本比较",list(versions),editable=False)
+        if not ok:
+            return
+        first, second = sorted((self.versions[current],versions[choice]),
+                               key=lambda v:datetime.fromisoformat(v["created_at"]))
+        repo = self.repo
+        def ready(rows):
+            dialog = QDialog(self)
+            dialog.setWindowTitle("备份版本差异")
+            dialog.resize(720,440)
+            box = QVBoxLayout(dialog)
+            box.addWidget(text_label(f"{date_text(first['created_at'])} → {date_text(second['created_at'])} · {len(rows):,} 项变化"))
+            table, model = records_table(dialog,[("变化",lambda r:r[0],130),("路径",lambda r:r[1],None)],"backupVersionDiff")
+            model.replace(rows)
+            box.addWidget(table)
+            dialog.exec()
+        self.page.task("正在比较版本…",lambda *_:list(compare_versions(
+            read_manifest(repo,first["id"]),read_manifest(repo,second["id"]))),ready)
+
+    def retire(self):
+        vid, repo = self.version.currentData(), self.repo
+        if vid and self.page.window.confirm("删除备份版本",f"版本 {vid}\n版本将移出列表，可从仓库操作中找回。","删除此版本"):
+            self.page.task("正在移出版本…",lambda *_:set_retired(repo,vid,retired=True),
+                           lambda _:self.page.open_repository(repo))
+
+    def reinstate(self):
+        repo = self.repo
+        def ready(versions):
+            if versions:
+                vid, ok = QInputDialog.getItem(self,"找回已删除的版本","版本编号",versions,editable=False)
+                if ok:
+                    self.page.task("正在恢复版本…",lambda *_:set_retired(repo,vid,retired=False),
+                                   lambda _:self.page.open_repository(repo))
+            else:
+                self.page.window._note("仓库没有已删除的版本。")
+        self.page.task("正在读取已删除的版本…",lambda *_:retired_versions(repo),ready)
+
+    def copy(self):
+        target = folder_dialog(self,"选择存放仓库副本的空目录")
+        repo = self.repo
+        if target and self.page.window.confirm("复制备份仓库",f"{repo}\n→ {target}","确认复制"):
+            self.page.task("正在复制并校验仓库…",
+                           lambda cancel,progress:copy_repository(repo,target,cancel=cancel,progress=progress),
+                           lambda result:self.page.window._note(f"已复制 {result[0]} 个版本、{result[1]} 个内容对象。"))
 
     def execute(self):
         plan = self.plan
@@ -199,6 +364,7 @@ class RecoveryTab(QWidget):
         def finished(result):
             self.plan = None
             self.apply.setEnabled(False)
+            self.export_button.setEnabled(False)
             prefix = "已取消，保留完成项" if result["cancelled"] else "恢复结束"
             self.summary.setText(f"{prefix}　·　已恢复文件 {result['restored']:,}　·　创建目录 {result['created_dirs']:,}　·　"
                                  f"跳过 {result['skipped']:,}　·　失败 {result['failed']:,}")

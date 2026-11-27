@@ -3,12 +3,14 @@ from pathlib import Path
 from threading import Event
 from time import monotonic
 
-from PySide6.QtWidgets import QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+                               QInputDialog, QLabel, QTabWidget, QVBoxLayout, QWidget)
 
 from .backup_demo import create_backup_demo
 from .backup_format import list_versions, verify_repository
 from .backup_recover_ui import RecoveryTab, STATUS, folder_dialog, text_label
 from .backup_writer import prepare_backup, write_backup
+from .backup_tools import BackupPresets, export_csv
 from .catalog import Catalog
 from .catalog_widgets import button, records_table
 from .file_model import size_text
@@ -20,6 +22,8 @@ class BackupPage(QFrame):
         self.window = window
         self.db_path = window.journal.path
         self.registry = Catalog(self.db_path)
+        self.presets = BackupPresets(self.db_path)
+        self.last_report = None
         self.plan = self.target = self.repo = None
         self.sources = []
         self.setObjectName("center")
@@ -43,7 +47,7 @@ class BackupPage(QFrame):
         layout.addWidget(self.tabs,1)
         self.refresh_sources()
 
-    def task(self,caption,work,done):
+    def task(self,caption,work,done,failed=None):
         if self.window.job is not None:
             return
         cancel = Event()
@@ -55,6 +59,8 @@ class BackupPage(QFrame):
                 next_update = monotonic()+.10
         def interrupted(stopped,error):
             self.window._note("操作已取消。" if stopped else f"操作未完成：{error}")
+            if failed:
+                failed(stopped,error)
         self.window._run(lambda:work(cancel,progress),done,caption,cancel,interrupted=interrupted)
 
     def _writer(self):
@@ -73,6 +79,11 @@ class BackupPage(QFrame):
         repo_row.addWidget(self.target_label,1)
         repo_row.addWidget(button("选择备份目录…","chooseBackupTarget",self.choose_target))
         form.addRow("备份仓库",repo_row)
+        presets = QHBoxLayout()
+        presets.addWidget(button("保存模板…","saveBackupPreset",self.save_preset))
+        presets.addWidget(button("使用模板…","loadBackupPreset",self.load_preset))
+        presets.addStretch()
+        form.addRow("备份模板",presets)
         layout.addLayout(form)
         actions = QHBoxLayout()
         self.preflight = button("预检备份范围","prepareBackup",self.prepare)
@@ -84,6 +95,9 @@ class BackupPage(QFrame):
         self.browse = button("浏览此仓库","browseWrittenBackup",lambda:self.open_repository(self.target))
         self.browse.setEnabled(False)
         actions.addWidget(self.browse)
+        self.report_button = button("导出备份报告…","exportBackupReport",self.export_report)
+        self.report_button.setEnabled(False)
+        actions.addWidget(self.report_button)
         layout.addLayout(actions)
         self.stats = text_label()
         self.stats.setObjectName("backupSummary")
@@ -151,6 +165,39 @@ class BackupPage(QFrame):
             self.browse.setEnabled(False)
             self.invalidate()
 
+    def save_preset(self):
+        root = self.source()
+        if not root or not self.target:
+            self.window._note("请先选择来源档案库和备份目录。")
+            return
+        name, ok = QInputDialog.getText(self,"保存备份模板","模板名称")
+        if ok and name.strip():
+            if (any(p["name"] == name.strip() for p in self.presets.list()) and
+                    not self.window.confirm("替换备份模板",name.strip(),"替换模板")):
+                return
+            self.presets.save(name,root["id"],self.target)
+            self.window._note("备份模板已保存。")
+
+    def load_preset(self):
+        presets = {row["name"]:row for row in self.presets.list()}
+        if not presets:
+            self.window._note("请先保存一个备份模板。")
+            return
+        name, ok = QInputDialog.getItem(self,"使用备份模板","模板",list(presets),editable=False)
+        if ok:
+            preset = presets[name]
+            self.target = Path(preset["target"])
+            self.target_label.setText(str(self.target))
+            self.browse.setEnabled(False)
+            self.refresh_sources(preset["root_id"])
+
+    def export_report(self):
+        path, _ = QFileDialog.getSaveFileName(self,"保存备份报告","备份报告.csv","CSV (*.csv)")
+        if path and self.last_report:
+            report = self.last_report
+            self.task("正在导出备份报告…",lambda *_:export_csv(Path(path),("项目","内容"),report),
+                      lambda _:self.window._note("备份报告已保存。"))
+
     def prepare(self):
         root,repo = self.source(),self.target
         self.invalidate()
@@ -174,15 +221,30 @@ class BackupPage(QFrame):
             return
         self.plan = None
         self.start.setEnabled(False)
+        started = monotonic()
+        info = [("来源",str(plan.source)),("仓库",str(plan.repo))]
+        def failed(stopped,error):
+            self.last_report = [*info,("状态","已取消" if stopped else "失败"),
+                                ("用时（秒）",round(monotonic()-started,2)),
+                                ("说明",str(error) if error else "任务已取消")]
+            self.report_button.setEnabled(True)
         def finished(result):
+            self.last_report = [("版本",result["id"]),*info,
+                                ("状态",STATUS[result["status"]]),("文件数",result["files"]),
+                                ("读取字节",result["bytes_read"]),("新增对象",result["new_objects"]),
+                                ("问题数",len(result["issues"])),("用时（秒）",round(result["elapsed"],2))]
+            self.last_report.extend((item["path"],item["reason"]) for item in result["issues"])
+            self.report_button.setEnabled(True)
             self.writer_issues.replace(result["issues"])
             self.stats.setText(f"备份{STATUS[result['status']]}　·　{result['files']:,} 个文件　·　"
                                f"{result['file_bytes']:,} 字节　·　新内容对象 {result['new_objects']:,} 个"
                                f"　·　提示 {len(result['issues']):,} 条\n版本 {result['id']}")
             self.browse.setEnabled(True)
             self.set_verify_repo(plan.repo)
-        self.task("正在读取文件并创建备份…",lambda cancel,progress:write_backup(plan,cancel=cancel,
-                  progress=progress),finished)
+        def run(cancel,progress):
+            result = write_backup(plan,cancel=cancel,progress=progress)
+            return dict(result,elapsed=monotonic()-started)
+        self.task("正在读取文件并创建备份…",run,finished,failed=failed)
 
     def demo(self):
         def generated(result):
