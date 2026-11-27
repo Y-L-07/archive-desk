@@ -1,4 +1,4 @@
-# 归档台 V4 · 备份与找回
+# 归档台 V5 · 备份与档案库
 
 归档台是使用 Python、PySide6 Widgets 与 SQLite 的 Windows 本地桌面工具。可手动将文件夹登记为档案库，整理、检索、比较清单，或把文件内容保存到独立的备份仓库。换电脑后，带上仓库即可按版本找回文件。
 
@@ -6,7 +6,14 @@
 
 第一次使用请先阅读根目录的「使用说明书.md」。
 
-本机构建后的入口是 `dist\V4\归档台\归档台.exe`。从 GitHub 获取源码后，可按下方 PowerShell 命令启动或打包。
+本机构建后的入口是 `dist\V5\归档台\归档台.exe`。从 GitHub 获取源码后，可按下方 PowerShell 命令启动或打包。
+
+### V5 常用入口
+
+- 「创建备份」可以保存和复用备份模板，并导出本次备份报告。
+- 导入仓库后可以跨版本搜索、比较版本、删除与找回版本、复制仓库，并在预览后导出恢复清单。删除可撤销，共享对象继续保留。
+- 「档案库」可检查所选库的重复件并生成隔离计划，检索结果支持图片、文本和 PDF 首页预览。
+- 「空间统计 → 月度趋势」按完整命名快照计算每个库的扩展名或目录用量变化。
 
 ### 首次备份与演示
 
@@ -188,11 +195,11 @@ V2、V3 共 9 个窗口脚本均取得通过结果。规则方案、收件箱和
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install "PyInstaller>=6.11,<7"
-.\.venv\Scripts\python.exe -m PyInstaller --distpath ".\dist\V4" --workpath ".\build\V4" ".\归档台.spec"
-& ".\dist\V4\归档台\归档台.exe"
+.\.venv\Scripts\python.exe -m PyInstaller --distpath ".\dist\V5" --workpath ".\build\V5" ".\归档台.spec"
+& ".\dist\V5\归档台\归档台.exe"
 ```
 
-分发时复制整个 `dist\V4\归档台` 目录，其中的 `_internal` 包含 Qt 和 Python 运行库。
+分发时复制整个 `dist\V5\归档台` 目录，其中的 `_internal` 包含 Qt、Python 和 PDF 预览运行库。
 
 ## 源码入口
 
