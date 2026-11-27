@@ -26,7 +26,7 @@ def directories(folder):
 def run_phase(phase,work):
     from PySide6.QtCore import QTimer, Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+    from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QInputDialog, QLineEdit, QMessageBox, QPushButton, QTableView
 
     import main as desktop
     from archive_desk.backup_format import list_versions, object_path
@@ -86,6 +86,16 @@ def run_phase(phase,work):
                 assert not list(repo.iterdir())
                 confirm("executeBackup")
                 one, = list_versions(repo)
+                with patch.object(QInputDialog,"getText",return_value=("演示模板",True)):
+                    press("saveBackupPreset")
+                with patch.object(QInputDialog,"getItem",return_value=("演示模板",True)):
+                    press("loadBackupPreset")
+                assert page.target==repo and page.source()["id"]==registered["id"]
+                report = work/"report.csv"
+                with patch.object(QFileDialog,"getSaveFileName",return_value=(str(report),"CSV")):
+                    press("exportBackupReport")
+                settle()
+                assert "读取字节" in report.read_text(encoding="utf-8-sig")
                 assert one["status"]=="complete" and one["files"]==len(old),window.notice.text()
                 assert contents(source)==old
                 (source/"交接"/"项目说明.txt").write_text("第二版，保留旧版内容。",encoding="utf-8")
@@ -122,6 +132,17 @@ def run_phase(phase,work):
                 portable = work/"portable"
                 pick("importBackupRepo",portable)
                 assert recovery.version.count()==2 and recovery.repo==portable
+                press("searchBackup")
+                dialog = next(d for d in recovery.findChildren(QDialog) if d.windowTitle()=="搜索备份版本")
+                dialog.findChildren(QLineEdit)[0].setText("项目说明")
+                QTest.mouseClick(dialog.findChild(QPushButton,"runBackupSearch"),Qt.MouseButton.LeftButton)
+                settle()
+                search = dialog.findChild(QTableView,"backupSearchResults")
+                assert search.model().rowCount()==2
+                search.doubleClicked.emit(search.model().index(1,1))
+                settle()
+                assert recovery.version.currentData()==meta["old_id"]
+                assert recovery.tree_model.selected_paths()=={"交接/项目说明.txt"}
                 recovery.version.setCurrentIndex(recovery.version.findData(meta["old_id"]))
                 settle()
                 root = recovery.tree_model.index(0,0)
@@ -133,6 +154,11 @@ def run_phase(phase,work):
                 press("prepareRestore")
                 settle()
                 assert not list(whole.iterdir()) and len(recovery.plan.entries)>=len(meta["old"])
+                plan_csv = work/"restore.csv"
+                with patch.object(QFileDialog,"getSaveFileName",return_value=(str(plan_csv),"CSV")):
+                    press("exportRestorePlan")
+                settle()
+                assert "项目说明" in plan_csv.read_text(encoding="utf-8-sig")
                 confirm("executeRestore",False)
                 assert not list(whole.iterdir())
                 confirm("executeRestore")

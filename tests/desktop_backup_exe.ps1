@@ -1,5 +1,5 @@
 ﻿using namespace System.Windows.Automation
-param([switch]$SourcePreflight)
+param([switch]$SourcePreflight, [ValidateSet('V4','V5')][string]$Version='V4')
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
@@ -98,7 +98,7 @@ function Start-Isolated([string]$name) {
         $start.Arguments = '"' + (Join-Path $project 'main.py') + '"'
         $start.EnvironmentVariables['PYTHONPATH'] = Join-Path $project '.venv\Lib\site-packages'
     } else {
-        $start.FileName = (Resolve-Path -LiteralPath (Join-Path $project 'dist\V4\归档台\归档台.exe')).Path
+        $start.FileName = (Resolve-Path -LiteralPath (Join-Path $project "dist\$Version\归档台\归档台.exe")).Path
     }
     $start.WorkingDirectory = $state
     $start.UseShellExecute = $false
