@@ -1,6 +1,7 @@
 """Paged statistics over the published catalog, with exact saved-search drill-down."""
 import sqlite3
-from pathlib import Path
+from collections import defaultdict
+from pathlib import Path, PurePosixPath
 
 from .core import check_cancel
 from .journal import database_connection
@@ -26,6 +27,39 @@ def _directory_at(relpath, depth):
 class CatalogStats:
     def __init__(self, db_path):
         self.path = Path(db_path)
+
+    def monthly(self, group_by, *, root_id=None, depth=1, cancel=None):
+        """Compare the last complete named snapshot of each covered month."""
+        if group_by not in ("directory","extension") or not 1 <= depth <= 32:
+            raise ValueError("空间趋势的分组方式或层级无效")
+        where, args = (" AND s.root_id=?", (root_id,)) if root_id is not None else ("", ())
+        result, previous = [], {}
+        with database_connection(self.path) as db:
+            db.execute("BEGIN")
+            snapshots = db.execute(f"""SELECT id,root_id,month,label FROM (
+                SELECT s.id,s.root_id,substr(s.indexed_at,1,7) AS month,r.name AS label,
+                       row_number() OVER (PARTITION BY s.root_id,substr(s.indexed_at,1,7)
+                                          ORDER BY s.indexed_at DESC,s.id DESC) AS rn
+                FROM catalog_snapshots s JOIN catalog_roots r ON s.root_id=r.id
+                WHERE s.scan_state='complete' {where}
+                ) WHERE rn=1 ORDER BY root_id,month""",args)
+            for snapshot in snapshots:
+                check_cancel(cancel)
+                sizes = defaultdict(int)
+                for path, size in db.execute("SELECT relpath,size FROM catalog_snapshot_files WHERE snapshot_id=?",
+                                             (snapshot["id"],)):
+                    check_cancel(cancel)
+                    key = (_directory_at(path,depth) if group_by=="directory"
+                           else PurePosixPath(path).suffix.lower())
+                    sizes[key] += size
+                before = previous.get(snapshot["root_id"])
+                for key in sorted(sizes.keys() | (before[1].keys() if before else set())):
+                    count = sizes.get(key,0)
+                    result.append(dict(root=snapshot["label"], month=snapshot["month"], group=key,
+                                       size=count, previous=before[0] if before else "",
+                                       delta=count-before[1].get(key,0) if before else None))
+                previous[snapshot["root_id"]] = (snapshot["month"],sizes)
+        return result
 
     def group(self, group_by, *, root_id=None, depth=1, page=1, page_size=100, cancel=None):
         if group_by not in ("extension", "directory"):

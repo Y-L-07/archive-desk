@@ -56,6 +56,7 @@ class CatalogPage(QFrame):
         header.addWidget(self.hash)
         self.refresh_button = button("刷新索引","refreshArchive",self.refresh)
         header.addWidget(self.refresh_button)
+        header.addWidget(button("检查重复件","catalogDuplicates",self.check_duplicates))
         header.addWidget(button("生成两库演示","archiveDemo",self.demo))
         layout.addLayout(header)
         info = QHBoxLayout()
@@ -244,6 +245,36 @@ class CatalogPage(QFrame):
             self.tabs.setCurrentWidget(self.search)
             self.search.locate(choice["id"])
         self.task("正在查找关联档案…",lambda _:self.store.entries_for_item(item_id),show,cancellable=False)
+
+    def preview_content(self,entry):
+        from .content_preview import read_preview, show_preview
+        def work(_):
+            path = self.store.folder_for(entry["id"]) / entry["name"]
+            return path,read_preview(path,entry)
+        self.task("正在加载文件预览…",work,lambda result:show_preview(self,*result))
+
+    def check_duplicates(self):
+        from contextlib import ExitStack
+        from .backup_paths import pin_path
+        from .duplicates_ui import show_duplicates
+        from .scanner import scan
+        record = next((r for r in self.roots if r["id"] == self.root_id),None)
+        if not record:
+            self.message("请先选择要检查重复件的档案库。")
+            return
+        root = Path(record["path"])
+        def work(cancel):
+            with ExitStack() as stack:
+                identity = pin_path(stack,root)
+                if tuple(map(str,identity)) != (record["dev"],record["ino"]):
+                    raise ValueError("档案库的目录身份已变化")
+                return scan(root,recursive=True,cancel=cancel)
+        def ready(files):
+            self.message(f"扫描到 {len(files):,} 项，有 {len(files.warnings):,} 条读取提示。")
+            groups = show_duplicates(self,root,files) if files else None
+            if groups:
+                self.window.load_quarantine(root,files,groups)
+        self.task("正在扫描档案库以检查重复件…",work,ready)
 
     def history_for(self,entry_id):
         def show(rows):

@@ -957,6 +957,12 @@ class MainWindow(QMainWindow):
                     combo.setCurrentIndex(0)
                 self.replan()
 
+    def load_quarantine(self, root, files, groups):
+        self._set_source(root)
+        self.files = files
+        self._quarantine_mode(groups)
+        self.replan()
+
     def _quarantine_mode(self, groups):
         self.quarantine_groups = tuple(groups)
         self.list_title.setText("隔离计划" if groups else "文件清单")

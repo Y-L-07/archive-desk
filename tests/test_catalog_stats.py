@@ -87,6 +87,22 @@ class CatalogStatsTests(unittest.TestCase):
         self.assertEqual(accumulated,all_rows["rows"])
         self.assertFalse(self.stats.group("extension",page=99,page_size=1)["rows"])
 
+    def test_monthly_disappearing_group_and_partial_snapshot(self):
+        from archive_desk.catalog_snapshots import SnapshotStore
+        SnapshotStore(self.db)
+        with database_connection(self.db) as db:
+            for month, state, files in [(1,'complete',[('a.txt',3),('书/a.pdf',9)]),
+                                        (2,'partial',[('a.txt',88)]),(3,'complete',[('a.txt',5)])]:
+                when = f'2026-{month:02d}-01T12:00:00+08:00'
+                sid = db.execute('INSERT INTO catalog_snapshots(root_id,name,created_at,indexed_at,generation,scan_state) '
+                                 'VALUES(?,?,?,?,?,?)',(self.roots[0],when,when,when,month,state)).lastrowid
+                db.executemany('INSERT INTO catalog_snapshot_files VALUES(?,?,?,0,NULL,0)',
+                               [(sid,path,size) for path,size in files])
+        rows = self.stats.monthly('directory',root_id=self.roots[0])
+        self.assertEqual([(r['month'],r['group'],r['size'],r['delta']) for r in rows],
+                         [('2026-01','',3,None),('2026-01','书',9,None),
+                          ('2026-03','',5,2),('2026-03','书',0,-9)])
+
     def test_empty_cancel_and_invalid_bucket(self):
         self.assertEqual(self.stats.group("directory",root_id=99)["files"],0)
         cancel = Event()

@@ -2,7 +2,7 @@
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QComboBox, QDialog, QHBoxLayout, QLabel, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QVBoxLayout, QWidget,
 )
 
@@ -63,6 +63,7 @@ class StatsTab(QWidget):
         self.depth.setAccessibleName("目录层级")
         top.addWidget(self.depth)
         top.addWidget(button("计算统计","computeSpace",self.compute))
+        top.addWidget(button("月度趋势…","spaceTrend",self.trend))
         top.addStretch()
         self.open = button("查看该组文件","filesFromSpace",self.drill)
         top.addWidget(self.open)
@@ -107,6 +108,28 @@ class StatsTab(QWidget):
 
     def selection(self,*_):
         self.open.setEnabled(bool(self.table.selectionModel().selectedRows()))
+
+    def trend(self):
+        mode, root_id, depth = self.group.currentData(), self.page.root_id, self.depth.value()
+        def ready(rows):
+            dialog = QDialog(self)
+            dialog.setWindowTitle("档案库月度空间趋势")
+            dialog.resize(820,470)
+            layout = QVBoxLayout(dialog)
+            hint = QLabel("每个库使用当月最后一份完整快照。变化量与上一个有完整快照的月份比较。"
+                          if rows else "暂无可比较数据。请先在快照比对页保存完整快照。")
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
+            columns = [("月份",lambda r:r["month"],90),("档案库",lambda r:r["root"],125),
+                       ("分组",lambda r:r["group"] or ("根目录" if mode=="directory" else "无扩展名"),None),
+                       ("字节",lambda r:f"{r['size']:,}",116),("对比月份",lambda r:r["previous"] or "—",90),
+                       ("变化字节",lambda r:f"{r['delta']:+,}" if r["delta"] is not None else "—",116)]
+            table, model = records_table(dialog,columns,"monthlySpace")
+            model.replace(rows)
+            layout.addWidget(table)
+            dialog.exec()
+        self.page.task("正在读取月度快照…",lambda cancel:self.store.monthly(
+            mode,root_id=root_id,depth=depth,cancel=cancel),ready)
 
     def turn(self,delta):
         self.number = max(1,self.number+delta)

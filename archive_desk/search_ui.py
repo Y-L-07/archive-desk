@@ -165,6 +165,8 @@ class SearchTab(QWidget):
         box.addWidget(self.save_note)
         self.open_button = button("打开所在目录","openArchiveFolder",self.open_folder)
         box.addWidget(self.open_button)
+        self.content_button = button("预览文件内容","archiveContentPreview",self.preview_content)
+        box.addWidget(self.content_button)
         self.preview_button = button("送入整理预览","previewArchiveEntry",self.send_preview)
         box.addWidget(self.preview_button)
         self.history_button = button("查看关联历史","archiveHistory",self.open_history)
@@ -345,6 +347,7 @@ class SearchTab(QWidget):
         can_open = bool(entry and entry["online"] and entry["active"] and not entry["stale"])
         self.open_button.setVisible(can_open)
         self.preview_button.setVisible(can_open)
+        self.content_button.setVisible(can_open)
         self.favorite.setChecked(bool(entry and entry["favorite"]))
         self.note.setPlainText(entry["note"] if entry else "")
         if not entry:
@@ -388,6 +391,11 @@ class SearchTab(QWidget):
         entry = self.current()
         if entry:
             self.page.open_entry(entry, preview=True)
+
+    def preview_content(self):
+        entry = self.current()
+        if entry:
+            self.page.preview_content(entry)
 
     def open_history(self):
         entry = self.current()
