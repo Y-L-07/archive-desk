@@ -140,6 +140,8 @@ class MainWindow(QMainWindow):
         self.inbox.stopped.connect(self.close)
         self.pages.addWidget(self.inbox)
         self.catalog = None
+        self.backups = None
+        self.pages.addWidget(QWidget())
         self.pages.addWidget(QWidget())
         base.addWidget(self.pages, 1)
         self._render_rules()
@@ -181,8 +183,9 @@ class MainWindow(QMainWindow):
         self.history_button = button("历史", lambda: self.switch_page(1), "historyButton", "history", "#d2e5d6")
         self.inbox_button = button("收件箱", lambda: self.switch_page(2), "inboxButton", "archive", "#d2e5d6")
         self.catalog_button = button("档案库", lambda: self.switch_page(3), "catalogButton", "all", "#d2e5d6")
+        self.backup_button = button("备份与找回", lambda: self.switch_page(4), "backupButton", "archive", "#d2e5d6")
         group = QButtonGroup(frame)
-        for widget in (self.workspace_button, self.catalog_button, self.inbox_button, self.history_button):
+        for widget in (self.workspace_button, self.catalog_button, self.backup_button, self.inbox_button, self.history_button):
             widget.setCheckable(True)
             group.addButton(widget)
             row.addWidget(widget)
@@ -466,7 +469,19 @@ class MainWindow(QMainWindow):
     def switch_page(self, index):
         if index == 3:
             self.ensure_catalog().reload()
+        elif index == 4:
+            if self.backups is None:
+                from .backup_ui import BackupPage
+                page = BackupPage(self)
+                placeholder = self.pages.widget(4)
+                self.pages.removeWidget(placeholder)
+                placeholder.deleteLater()
+                self.pages.insertWidget(4,page)
+                self.backups = page
+            else:
+                self.backups.refresh_sources()
         self.pages.setCurrentIndex(index)
+        self.backup_button.setChecked(index == 4)
         self.catalog_button.setChecked(index == 3)
         self.workspace_button.setChecked(index == 0)
         self.history_button.setChecked(index == 1)
@@ -593,6 +608,9 @@ class MainWindow(QMainWindow):
         if self.catalog is not None:
             self.catalog.setEnabled(idle)
         self.catalog_button.setEnabled(idle)
+        self.backup_button.setEnabled(idle)
+        if self.backups is not None:
+            self.backups.setEnabled(idle)
         for widget in (self.open_button, self.demo_button, self.rules_button, self.recursive,
                        self.empty_action):
             widget.setEnabled(idle)
